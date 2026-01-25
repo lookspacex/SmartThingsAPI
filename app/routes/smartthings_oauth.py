@@ -4,7 +4,7 @@ import datetime as dt
 import base64
 import hashlib
 import secrets
-from typing import Any
+from typing import Any, Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -53,8 +53,10 @@ def authorize(user=Depends(get_current_user)) -> RedirectResponse:
 
 @router.get("/callback")
 def callback(
-    code: str = Query(...),
-    state: str = Query(...),
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    error_description: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ) -> Any:
     """
@@ -63,6 +65,21 @@ def callback(
     """
     if not settings.smartthings_client_id or not settings.smartthings_client_secret or not settings.smartthings_redirect_uri:
         raise HTTPException(status_code=500, detail="SmartThings OAuth is not configured")
+
+    # SmartThings may redirect back with error params instead of code.
+    if error:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": error,
+                "error_description": error_description or "",
+            },
+        )
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing OAuth query parameter: code")
+    if not state:
+        raise HTTPException(status_code=400, detail="Missing OAuth query parameter: state")
 
     try:
         payload = parse_state(state)
