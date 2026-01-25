@@ -186,3 +186,130 @@ CORS_ALLOW_ORIGINS=https://your-frontend.com
   - 支持 SmartThings 的 `CONFIRMATION` / `PING` lifecycle（用于通过 SmartThings 的 WebHook 验证）
 
 注意：这是 SmartApp 的 lifecycle webhook，不是我们客户端调用的接口；它返回的是 SmartThings 要求的“原始 lifecycle JSON”，不会走 `code/msg/data` 包装。
+
+---
+
+### 6) 服务器上 Nginx 反代（让 `https://glowlabwall.com/...` 打到 FastAPI）
+
+你现在如果执行：
+
+```bash
+curl -I https://glowlabwall.com/
+curl -I https://glowlabwall.com/smartthings/smartapp
+```
+
+- `/` 返回 200 且 `Server: nginx/...`：说明 **Nginx 对外通了**
+- `/smartthings/smartapp` 返回 **404**：说明 **这个路径还没反代到 FastAPI**（还在走静态站点/默认站点）
+
+#### 6.1 推荐做法：只反代 API 相关路径（保留你现有的静态首页）
+
+在你的站点配置（常见是 `/etc/nginx/sites-available/<your-site>`）里，给 `server {}` 增加这些 `location`：
+
+```nginx
+# SmartApp lifecycle webhook
+location /smartthings/ {
+  proxy_pass http://127.0.0.1:8000;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+# OAuth 回调与跳转
+location /oauth/ {
+  proxy_pass http://127.0.0.1:8000;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+# 业务 API（用户/设备/控制）
+location ~ ^/(users|devices|aircon|tv|auth)(/|$) {
+  proxy_pass http://127.0.0.1:8000;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+> 备注：你用 `curl -I` 发的是 **HEAD** 请求，而本项目的 `POST /smartthings/smartapp` 只允许 POST；因此当反代正确后，`curl -I https://.../smartthings/smartapp` 可能会变成 **405 Method Not Allowed**（这是正常现象）。
+
+#### 6.2 重新加载 Nginx
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+#### 6.3 验证 SmartApp WebHook 端点是否真正打到 FastAPI
+
+用 POST 模拟 SmartThings 的 PING（必须 POST）：
+
+```bash
+curl -i -X POST "https://glowlabwall.com/smartthings/smartapp" \
+  -H "Content-Type: application/json" \
+  -d '{"lifecycle":"PING","pingData":{"challenge":"abc"}}'
+```
+
+预期返回（原始 JSON，不带 `code/msg/data` 包装）：
+
+```json
+{"pingData":{"challenge":"abc"}}
+```
+
+---
+
+### 7) 生产常驻运行（systemd 自启，不用手动开着终端）
+
+> 你如果只是 `kill` 掉 uvicorn，而没有配置 systemd，自然不会“自动再次启动”。生产建议用 systemd 常驻管理。
+
+#### 7.1 创建 systemd service
+
+在服务器创建文件：`/etc/systemd/system/smartthingsapi.service`
+
+```ini
+[Unit]
+Description=SmartThingsAPI (FastAPI/Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smartthingsapi/SmartThingsAPI
+EnvironmentFile=/opt/smartthingsapi/SmartThingsAPI/.env
+ExecStart=/opt/smartthingsapi/SmartThingsAPI/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=2
+
+# 生产可按需收紧权限（可选）
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### 7.2 启用并启动
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now smartthingsapi
+sudo systemctl status smartthingsapi --no-pager
+```
+
+#### 7.3 看日志
+
+```bash
+sudo journalctl -u smartthingsapi -f
+```
+
+#### 7.4 验证是否在监听 8000
+
+```bash
+sudo ss -lntp | grep ':8000' || echo "8000 not listening"
+curl -i https://glowlabwall.com/users/me
+```

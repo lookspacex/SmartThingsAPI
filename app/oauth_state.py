@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import time
-from typing import Any
+from typing import Any, Optional
 
 from app.config import settings
 
@@ -24,8 +24,12 @@ def _sign(payload_b64: str) -> str:
     return _b64url_encode(mac)
 
 
-def build_state(*, user_id: str, ttl_s: int = 15 * 60) -> str:
-    payload = {"userId": user_id, "exp": int(time.time()) + int(ttl_s)}
+def build_state(*, user_id: str, ttl_s: int = 15 * 60, pkce_verifier: Optional[str] = None) -> str:
+    payload: dict[str, Any] = {"userId": user_id, "exp": int(time.time()) + int(ttl_s)}
+    if pkce_verifier:
+        # NOTE: signed (integrity protected) but not encrypted. For higher security,
+        # store verifier server-side and reference it from state instead.
+        payload["pkceVerifier"] = pkce_verifier
     payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     sig_b64 = _sign(payload_b64)
     return f"{payload_b64}.{sig_b64}"

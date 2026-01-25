@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import base64
+import hashlib
+import secrets
 from typing import Any
 
 import requests
@@ -16,6 +19,10 @@ from app.security import get_current_user
 
 router = APIRouter(prefix="/oauth/smartthings", tags=["smartthings-oauth"])
 
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
 
 @router.get("/authorize")
 def authorize(user=Depends(get_current_user)) -> RedirectResponse:
@@ -26,13 +33,18 @@ def authorize(user=Depends(get_current_user)) -> RedirectResponse:
     if not settings.smartthings_client_id or not settings.smartthings_redirect_uri:
         raise HTTPException(status_code=500, detail="SmartThings OAuth is not configured")
 
-    state = build_state(user_id=user.id)
+    # PKCE support (some SmartThings OAuth flows require it; harmless if ignored).
+    pkce_verifier = secrets.token_urlsafe(48)
+    pkce_challenge = _pkce_challenge(pkce_verifier)
+    state = build_state(user_id=user.id, pkce_verifier=pkce_verifier)
     params = {
         "client_id": settings.smartthings_client_id,
         "response_type": "code",
         "redirect_uri": settings.smartthings_redirect_uri,
         "scope": settings.smartthings_oauth_scope,
         "state": state,
+        "code_challenge": pkce_challenge,
+        "code_challenge_method": "S256",
     }
     # RedirectResponse will encode params properly if we build the URL ourselves:
     req = requests.Request("GET", settings.smartthings_oauth_authorize_url, params=params).prepare()
@@ -63,6 +75,9 @@ def callback(
         "code": code,
         "redirect_uri": settings.smartthings_redirect_uri,
     }
+    pkce_verifier = payload.get("pkceVerifier")
+    if isinstance(pkce_verifier, str) and pkce_verifier:
+        data["code_verifier"] = pkce_verifier
     try:
         resp = requests.post(
             settings.smartthings_oauth_token_url,
