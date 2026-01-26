@@ -62,8 +62,13 @@ def get_smartthings_client(request: Request, db: Session = Depends(get_db)) -> S
                     import datetime as dt
 
                     now = dt.datetime.now(dt.timezone.utc)
+                    exp = st.expires_at
+                    # SQLite may return naive datetimes even if timezone=True.
+                    # Treat naive values as UTC to avoid "naive vs aware" crashes.
+                    if exp is not None and exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=dt.timezone.utc)
                     # refresh 60s before expiry to avoid races
-                    if now >= (st.expires_at - dt.timedelta(seconds=60)):
+                    if exp is not None and now >= (exp - dt.timedelta(seconds=60)):
                         if not st.refresh_token:
                             raise HTTPException(
                                 status_code=401,
