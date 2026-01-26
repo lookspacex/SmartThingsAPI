@@ -94,6 +94,19 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Keep errors consistent for clients. In prod, avoid leaking internals.
+        data = {"error": str(exc)} if settings.app_env != "prod" else None
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "msg": "Internal Server Error",
+                "data": data,
+            },
+        )
+
     app.include_router(devices_router)
     app.include_router(auth_router)
     app.include_router(aircon_router)
